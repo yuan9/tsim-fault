@@ -86,6 +86,36 @@ class Tsim():
     def write(self, s):
         #print '>', s
         self.tsim.stdin.write(s)
+#########################################################################
+#  Yuan: Add check memory function
+#########################################################################
+    def check_mem(self):
+     #Yuan: add read the value of the mem location
+        self.write('mem 0x4000dff4\n')
+        mem =''
+        i = 0
+        l = self.read(1)
+        #print 'l:', l
+                         
+        if l is not None:
+            mem += l[0]
+        #print 'mem:', mem
+
+        while '4000DFF4' not in mem:
+            #print 'reach here'
+            i += 1
+            l = self.read(1)
+            if l:
+                mem += l[0]
+                #print 'Yuan l:', l 
+
+        #print 'mem_split:', mem.split("\r\n")
+        for str in mem.split("\r\n"):
+            if "4000DFF4" in str:
+                print "MemoryContent:", str
+        #print 'split:',mem.split("\r\n")[2]        
+
+##########################################################################
 
     #Yuan: read all the resigisters i,o,g pc and npc
     def refresh_regs(self):
@@ -515,7 +545,7 @@ class FaultInjector(Tsim):
                         if self.num_skips and instr > instri:
                             npc = self.read_reg('npc')
                             print 'pc:', hex(self.read_reg('pc'))
-                            print 'npc:', hex(npc)
+                           # print 'npc:', hex(npc)
                             for j in range(1,self.num_skips):
                                 #print 'reach here'
                                 npc += 4
@@ -556,6 +586,10 @@ class FaultInjector(Tsim):
                         instr += 1
                     self.cont()
                     ftype = self.check_output()
+                  
+                    ################################################
+                    self.check_mem()
+                    ################################################
                     timeout_timer.reset()
                     break
                 except (Watchdog) as e:

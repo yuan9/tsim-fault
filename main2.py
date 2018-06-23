@@ -3,6 +3,16 @@ import sys,os
 import subprocess, thread, threading, pty, select, signal
 import re, random
 import argparse
+from threading  import Thread
+try:
+    from Queue import Queue, Empty
+except ImportError:
+    from queue import Queue, Empty  # python 3.x
+
+def enqueue_output(out, queue):
+    for line in iter(out.readline, b''):
+        queue.put(line)
+    out.close()
 
 class Watchdog:
     def __init__(self, timeout, userHandler=None):  # timeout in seconds
@@ -50,6 +60,13 @@ class Tsim():
 
         self.tsim = subprocess.Popen(['tsim-leon3',self.progname], stdin=subprocess.PIPE, stdout=slave, close_fds=True)
         self.stdout = os.fdopen(master)
+
+
+        self.readq = Queue()
+        t = Thread(target=enqueue_output, args=(self.stdout, self.readq))
+        t.daemon = True # thread dies with the program
+        t.start()
+
         self.q.register(self.stdout, select.POLLIN)
         self.read(21)
         #self.read(19)
@@ -61,10 +78,17 @@ class Tsim():
         os.close(self.slave)
 
 
-    def read(self,lines):
+    def read(self, lines):
+        r = self._read(lines)
+        if r is not None:
+            for l in r:
+                print '>', l   
+        return r     
+
+    def _read(self,lines):
         s = []
         l = self.q.poll(1)
-        #print l
+
         if not l:
             l = self.q.poll(2)
             if not l:
@@ -72,50 +96,25 @@ class Tsim():
 
         for i in range(0,lines):
             #print i
-            l = self.stdout.readline()
+            try:  l = self.readq.get(timeout=.1) # or q.get(timeout=.1)
+            except Empty:
+                return None
+
             #print l
             #print '<',l
             #print l[:len(l)-1]
             while l[0] == '#':
-                l = self.stdout.readline()
+                try:  l = self.readq.get(timeout=.1) # or q.get(timeout=.1)
+                except Empty:
+                    l = None
             s.append(l)
 
 
         return s
 
     def write(self, s):
-        #print '>', s
+        print '<', s
         self.tsim.stdin.write(s)
-#########################################################################
-#  Yuan: Add check memory function
-#########################################################################
-    def check_mem(self):
-     #Yuan: add read the value of the mem location
-        self.write('mem 0x4000dff4\n')
-        mem =''
-        i = 0
-        l = self.read(1)
-        #print 'l:', l
-                         
-        if l is not None:
-            mem += l[0]
-        #print 'mem:', mem
-
-        while '4000DFF4' not in mem:
-            #print 'reach here'
-            i += 1
-            l = self.read(1)
-            if l:
-                mem += l[0]
-                #print 'Yuan l:', l 
-
-        #print 'mem_split:', mem.split("\r\n")
-        for str in mem.split("\r\n"):
-            if "4000DFF4" in str:
-                print "MemoryContent:", str
-        #print 'split:',mem.split("\r\n")[2]        
-
-##########################################################################
 
     #Yuan: read all the resigisters i,o,g pc and npc
     def refresh_regs(self):
@@ -218,12 +217,14 @@ class Tsim():
         #while True:
             #try:
         l = self.read(1)[0]
+        #l2 = self.read(1)n
         #print 1
-        #print l
+
 
         #sys.exit(0)
         #print 'substring on : ', l
         bp_num = int(l[10:l.index('at')-1])
+
         self.write('run\n')
  #       print 2
         #print self.read(2)
@@ -286,26 +287,42 @@ class Tsim():
         self.write('reset\n')
         self.write('bt\n')
         l = self.read(1)
+        #l = self.read(4)
+        print 'l:', l
 
         if l is not None:
             out += l[0]
+         
+       # for l_sub in l:
+       #     out += l_sub
+       # print 'out', out
 
         while 'Program exited normally.' not in out:
             i += 1
             if 'IU in error mode' in out:
                 self.match = 'IU in error mode'
                 return 3
-            elif i > 1000:
+            elif i > 5:
+                os.kill(self.tsim.pid, signal.SIGINT)
+                res = ''.join(self.read(4))
+                if 'Stopped at time ' in res:
+                    print('knocked program off of main loop')
+                    self.control_faults += 1
+                    self.match = '(no output)'
+                    return 2
+                if 'IU in error mode' in res:
+                    self.match = 'IU in error mode'
+                    return 3
                 raise IOError('read returning None')
             else:
                 # this is a hack
+                print(i)
                 self.write('reset\n')
                 self.write('bt\n')
 
                 l = self.read(1)
                 if l:
                     out += l[0]
-
 
         match = ''
         try:
@@ -319,6 +336,7 @@ class Tsim():
             self.match = '(no output)'
             self.data_faults += 1
             return 2
+
         elif 'CONTROL' in match:
             self.control_faults += 1
             self.match = '(no output)'
@@ -360,6 +378,7 @@ class Tsim():
 
 
     def reset(self,):
+        #print ("reach here")
         self.kill()
         self.load_tsim()
         self.lpc = 0
@@ -545,7 +564,7 @@ class FaultInjector(Tsim):
                         if self.num_skips and instr > instri:
                             npc = self.read_reg('npc')
                             print 'pc:', hex(self.read_reg('pc'))
-                           # print 'npc:', hex(npc)
+                            print 'npc:', hex(npc)
                             for j in range(1,self.num_skips):
                                 #print 'reach here'
                                 npc += 4
@@ -585,18 +604,26 @@ class FaultInjector(Tsim):
 
                         instr += 1
                     self.cont()
+               
                     ftype = self.check_output()
-                  
                     ################################################
-                    self.check_mem()
+                    #Yuan: add read the value of the mem location
+                    
+                    self.write('mem 0x4000dff4\n')
+                    l = self.read(3)
+                    print 'Yuan l:', l
                     ################################################
+                    print 'ftype',
                     timeout_timer.reset()
                     break
+
                 except (Watchdog) as e:
                     self.log('timer burned out')
                     while True:
                         try:
+                            
                             timeout_timer.reset()
+                            #self.log('debug')
                             self.reset()
                             #print debug
                             #print self.read(1)
